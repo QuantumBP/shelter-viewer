@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
   <script type="importmap">
   {
     "imports": {
@@ -17,14 +16,13 @@
     * { margin:0; padding:0; box-sizing:border-box; }
     body { overflow:hidden; background:#f5f5f5; font-family:sans-serif; }
 
-    model-viewer {
+    #canvas-container {
       width: 100%;
       height: 100vh;
-      background: #F5F5F5;
       position: relative;
-      z-index: 1;
-      --progress-bar-color: transparent;
     }
+
+    canvas { display:block; width:100%; height:100%; }
 
     .controls {
       position: absolute; top: 10px; left: 10px; background: white; padding: 10px; border-radius: 10px;
@@ -65,92 +63,226 @@
       background: rgba(0,0,0,0.7); color: #fff; padding: 6px 12px;
       border-radius: 6px; font-size: 12px; display: none;
     }
+
+    #loading-overlay {
+      position: absolute; top:0; left:0; width:100%; height:100%;
+      display:flex; align-items:center; justify-content:center;
+      background: #f5f5f5; z-index: 50; font-size: 14px; color: #666;
+    }
   </style>
 </head>
 <body>
 
-<!-- Controls -->
-<div class="controls" id="controls">
-  <div class="palette">
-    <img class="expand-btn" id="toggleExpand" src="https://img.icons8.com/ios-filled/50/expand.png" alt="Expand"/>
-    <label>Roof Color</label>
-    <div id="roofPalette" class="swatch-grid"></div>
+<div id="canvas-container">
+
+  <div id="loading-overlay">Loading models...</div>
+
+  <!-- Controls -->
+  <div class="controls" id="controls">
+    <div class="palette">
+      <img class="expand-btn" id="toggleExpand" src="https://img.icons8.com/ios-filled/50/expand.png" alt="Expand"/>
+      <label>Roof Color</label>
+      <div id="roofPalette" class="swatch-grid"></div>
+    </div>
+    <div class="palette">
+      <label>Frame Color</label>
+      <div id="framePalette" class="swatch-grid"></div>
+    </div>
   </div>
-  <div class="palette">
-    <label>Frame Color</label>
-    <div id="framePalette" class="swatch-grid"></div>
-  </div>
+
+  <div id="status"></div>
+
 </div>
 
-<div id="status"></div>
-
-<!-- Main viewer (shelter) -->
-<model-viewer
-  id="viewer"
-  src="https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb"
-  camera-controls
-  camera-orbit="75deg 80deg 600m"
-  interpolation-decay="50"
-  auto-rotate
-  auto-rotate-delay="3000"
-  rotation-per-second="2deg"
-  interaction-prompt="none"
-  exposure="0.5"
-  shadow-intensity="0.8"
-  environment-image="legacy">
-</model-viewer>
-
 <script type="module">
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-  const viewer = document.querySelector('#viewer');
+  // ====== CONFIG ======
+  const SHELTER_URL = "https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb";
+  const SCENERY_URL = "scene_4_tables.glb"; // relative — same repo
+
   const controlsEl = document.getElementById('controls');
   const toggleBtn = document.getElementById('toggleExpand');
   const statusEl = document.getElementById('status');
-
-  /*
-   * IMPORTANT: Change this URL after enabling GitHub Pages.
-   * It will be: https://YOUR_GITHUB_USERNAME.github.io/shelter-viewer/scene_4_tables.glb
-   */
-  const SCENERY_URL = "scene_4_tables.glb"; // relative URL — works because the GLB is in the same repo
+  const loadingOverlay = document.getElementById('loading-overlay');
+  const container = document.getElementById('canvas-container');
 
   function showStatus(msg) { statusEl.textContent = msg; statusEl.style.display = 'block'; console.log('[Status]', msg); }
   function hideStatus() { statusEl.style.display = 'none'; }
 
-  /*********************
-   * DPR
-   *********************/
-  const HIGH_DPR = Math.min(window.devicePixelRatio || 1, 2);
-  const LOW_DPR = 1;
-  const IDLE_MS = 2000;
-  let idleDprTimer = null;
+  // ====== THREE.JS SETUP ======
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xf5f5f5);
 
-  function setRendererDPR(dpr) {
-    try {
-      const r = viewer.renderer;
-      if (!r || typeof r.setPixelRatio !== 'function') return;
-      r.setPixelRatio(dpr);
-      const canvas = viewer.shadowRoot && viewer.shadowRoot.querySelector('canvas');
-      if (canvas && typeof r.setSize === 'function') {
-        r.setSize(canvas.clientWidth, canvas.clientHeight, false);
-      }
-      if (typeof viewer.requestRender === 'function') viewer.requestRender();
-    } catch (e) {}
-  }
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+  camera.position.set(300, 250, 400);
 
-  function onCameraChange(e) {
-    if (e && e.detail && e.detail.source === 'user-interaction') {
-      try { viewer.removeAttribute('auto-rotate'); } catch(e) {}
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.5;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  container.appendChild(renderer.domElement);
+
+  // Environment lighting (similar to model-viewer's "legacy")
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+  const envTexture = pmremGenerator.fromScene(new RoomEnvironment()).texture;
+  scene.environment = envTexture;
+  pmremGenerator.dispose();
+
+  // Subtle directional light for shadows
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+  dirLight.position.set(200, 400, 200);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.set(2048, 2048);
+  dirLight.shadow.camera.near = 1;
+  dirLight.shadow.camera.far = 2000;
+  dirLight.shadow.camera.left = -500;
+  dirLight.shadow.camera.right = 500;
+  dirLight.shadow.camera.top = 500;
+  dirLight.shadow.camera.bottom = -500;
+  scene.add(dirLight);
+
+  // Orbit controls
+  const orbitControls = new OrbitControls(camera, renderer.domElement);
+  orbitControls.enableDamping = true;
+  orbitControls.dampingFactor = 0.08;
+  orbitControls.target.set(0, 50, 0);
+  orbitControls.update();
+
+  // Auto-rotate
+  orbitControls.autoRotate = true;
+  orbitControls.autoRotateSpeed = 0.8;
+  let userInteracted = false;
+
+  // Stop auto-rotate on first user interaction
+  renderer.domElement.addEventListener('pointerdown', () => {
+    if (!userInteracted) {
+      userInteracted = true;
+      orbitControls.autoRotate = false;
     }
-    setRendererDPR(HIGH_DPR);
-    if (idleDprTimer) clearTimeout(idleDprTimer);
-    idleDprTimer = setTimeout(() => { setRendererDPR(LOW_DPR); idleDprTimer = null; }, IDLE_MS);
-  }
-  viewer.addEventListener('camera-change', onCameraChange);
+  }, { once: true });
 
-  /*********************
-   * COLORS
-   *********************/
+  // ====== ANIMATION LOOP ======
+  function animate() {
+    requestAnimationFrame(animate);
+    orbitControls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  // ====== RESIZE ======
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ====== LOAD MODELS ======
+  const loader = new GLTFLoader();
+  let shelterRoot = null;
+
+  // Track loading
+  let modelsToLoad = 2;
+  let modelsLoaded = 0;
+
+  function onModelLoaded() {
+    modelsLoaded++;
+    if (modelsLoaded >= modelsToLoad) {
+      loadingOverlay.style.display = 'none';
+      console.log('All models loaded.');
+
+      // Fit camera to shelter
+      if (shelterRoot) fitCameraToObject(shelterRoot);
+    }
+  }
+
+  function fitCameraToObject(object, offset = 1.5) {
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) return;
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const fov = camera.fov * (Math.PI / 180);
+    let dist = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * offset;
+    if (!isFinite(dist) || dist === 0) dist = maxDim * 2;
+
+    const direction = new THREE.Vector3().subVectors(camera.position, orbitControls.target).normalize();
+    camera.position.copy(center).add(direction.multiplyScalar(dist));
+    camera.near = Math.max(0.01, maxDim / 1000);
+    camera.far = Math.max(10000, maxDim * 100);
+    camera.updateProjectionMatrix();
+    orbitControls.target.copy(center);
+    orbitControls.update();
+  }
+
+  // Load shelter
+  showStatus('Loading shelter...');
+  loader.load(SHELTER_URL, (gltf) => {
+    shelterRoot = gltf.scene;
+    shelterRoot.name = 'Shelter';
+    shelterRoot.traverse(n => {
+      if (n.isMesh) {
+        n.castShadow = true;
+        n.receiveShadow = true;
+      }
+    });
+    scene.add(shelterRoot);
+    console.log('Shelter loaded.');
+
+    // Log materials
+    const matNames = [];
+    shelterRoot.traverse(n => {
+      if (n.isMesh) {
+        const mats = Array.isArray(n.material) ? n.material : [n.material];
+        mats.forEach(m => { if (m && m.name && !matNames.includes(m.name)) matNames.push(m.name); });
+      }
+    });
+    console.log('Shelter materials:', matNames);
+
+    onModelLoaded();
+  }, undefined, (err) => {
+    console.error('Shelter load error:', err);
+    showStatus('Shelter load failed.');
+    onModelLoaded();
+  });
+
+  // Load scenery
+  showStatus('Loading scenery...');
+  loader.load(SCENERY_URL, (gltf) => {
+    const sceneryRoot = gltf.scene;
+    sceneryRoot.name = 'Scenery';
+    sceneryRoot.traverse(n => {
+      if (n.isMesh) {
+        n.castShadow = true;
+        n.receiveShadow = true;
+      }
+    });
+    scene.add(sceneryRoot);
+    console.log('Scenery loaded.');
+
+    const matNames = [];
+    sceneryRoot.traverse(n => {
+      if (n.isMesh) {
+        const mats = Array.isArray(n.material) ? n.material : [n.material];
+        mats.forEach(m => { if (m && m.name && !matNames.includes(m.name)) matNames.push(m.name); });
+      }
+    });
+    console.log('Scenery materials:', matNames);
+
+    onModelLoaded();
+  }, undefined, (err) => {
+    console.error('Scenery load error:', err);
+    showStatus('Scenery load failed.');
+    onModelLoaded();
+  });
+
+  // ====== COLOR SWATCHES ======
   const roofColors = [
     "#CDC8B9","#B9AA91","#AAA096","#9B8C7D","#735F50","#6E5541","#412D28",
     "#5F5A50","#645F55","#413732","#4B4B4B","#373737","#000000","#5F5550",
@@ -189,31 +321,22 @@
     "#F0EBE1","#323232","#F0F0EB","#E1E1E1"
   ];
 
-  /*********************
-   * HELPERS
-   *********************/
-  function hexToRGBA(hex) {
-    return [
-      parseInt(hex.slice(1,3), 16) / 255,
-      parseInt(hex.slice(3,5), 16) / 255,
-      parseInt(hex.slice(5,7), 16) / 255,
-      1
-    ];
-  }
-
   function applyColor(materialName, hex) {
-    if (!viewer.model || !viewer.model.materials) return;
-    const color = hexToRGBA(hex);
-    viewer.model.materials.forEach(mat => {
-      if (mat.name === materialName || mat.name.startsWith(materialName)) {
-        mat.pbrMetallicRoughness.setBaseColorFactor(color);
-      }
+    if (!shelterRoot) return;
+    const color = new THREE.Color(hex);
+    shelterRoot.traverse(n => {
+      if (!n.isMesh) return;
+      const mats = Array.isArray(n.material) ? n.material : [n.material];
+      mats.forEach(mat => {
+        if (mat && (mat.name === materialName || mat.name.startsWith(materialName))) {
+          mat.color.copy(color);
+          // Remove any texture map so the flat color is visible
+          if (mat.map) { mat.map = null; mat.needsUpdate = true; }
+        }
+      });
     });
   }
 
-  /*********************
-   * BUILD PALETTES
-   *********************/
   function buildPalette(containerId, colors, materialName) {
     const container = document.getElementById(containerId);
     container.innerHTML = "";
@@ -233,121 +356,12 @@
   buildPalette("roofPalette", roofColors, "Roof");
   buildPalette("framePalette", beamColors, "Frame");
 
-  /*********************
-   * EXPAND / COLLAPSE
-   *********************/
+  // ====== EXPAND / COLLAPSE ======
   toggleBtn.addEventListener("click", () => {
     controlsEl.classList.toggle("expanded");
     toggleBtn.src = controlsEl.classList.contains("expanded")
       ? "https://img.icons8.com/ios-filled/50/collapse.png"
       : "https://img.icons8.com/ios-filled/50/expand.png";
-  });
-
-  /*********************
-   * SCENERY INJECTION
-   *
-   * 1. Capture model-viewer's internal Three.js Scene
-   *    via renderer.render() interception
-   * 2. Load scenery GLB with Three.js GLTFLoader
-   *    (relative URL — same origin, no CORS issues)
-   * 3. Add scenery into the captured scene
-   *********************/
-
-  function captureScene(mvElement) {
-    return new Promise((resolve) => {
-      let attempts = 0;
-      const poll = () => {
-        attempts++;
-        const renderer = mvElement.renderer;
-        if (!renderer || typeof renderer.render !== 'function') {
-          if (attempts < 50) { setTimeout(poll, 100); return; }
-          console.warn('Renderer not available after polling.');
-          resolve(null);
-          return;
-        }
-        const originalRender = renderer.render.bind(renderer);
-        let captured = false;
-        renderer.render = function(scene, camera) {
-          if (!captured && scene && scene.isScene) {
-            captured = true;
-            renderer.render = originalRender;
-            console.log('Captured internal scene:', scene);
-            resolve(scene);
-          }
-          return originalRender(scene, camera);
-        };
-        if (typeof mvElement.requestRender === 'function') mvElement.requestRender();
-        setTimeout(() => {
-          if (!captured) { renderer.render = originalRender; resolve(null); }
-        }, 5000);
-      };
-      poll();
-    });
-  }
-
-  async function injectScenery() {
-    if (!SCENERY_URL) return;
-
-    showStatus('Loading scenery...');
-    const loader = new GLTFLoader();
-
-    let gltf;
-    try {
-      gltf = await new Promise((resolve, reject) => {
-        loader.load(SCENERY_URL, resolve, undefined, reject);
-      });
-    } catch (err) {
-      console.error('GLTFLoader failed:', err);
-      showStatus('Scenery load failed. Check console.');
-      return;
-    }
-
-    if (!gltf || !gltf.scene) {
-      console.error('No scene in loaded GLB.');
-      showStatus('Scenery GLB has no scene.');
-      return;
-    }
-
-    console.log('Scenery loaded. Meshes:');
-    gltf.scene.traverse(n => {
-      if (n.isMesh) console.log('  mesh:', n.name, 'material:', n.material && n.material.name);
-    });
-
-    showStatus('Capturing viewer scene...');
-    const mainScene = await captureScene(viewer);
-    if (!mainScene) {
-      showStatus('Could not capture viewer scene.');
-      return;
-    }
-
-    showStatus('Injecting scenery...');
-    const sceneryRoot = gltf.scene;
-    sceneryRoot.name = 'InjectedScenery';
-    sceneryRoot.position.set(0, 0, 0);
-    mainScene.add(sceneryRoot);
-
-    // Poke re-renders
-    let pokeCount = 0;
-    const pokeInterval = setInterval(() => {
-      if (typeof viewer.requestRender === 'function') viewer.requestRender();
-      if (++pokeCount > 30) clearInterval(pokeInterval);
-    }, 100);
-
-    showStatus('Scenery injected!');
-    setTimeout(hideStatus, 3000);
-    console.log('Scenery injection complete!');
-  }
-
-  /*********************
-   * LOAD EVENT
-   *********************/
-  viewer.addEventListener("load", () => {
-    console.log("Shelter loaded.");
-    if (viewer.model && viewer.model.materials) {
-      console.log("Materials:", viewer.model.materials.map(m => m.name));
-    }
-    setRendererDPR(LOW_DPR);
-    injectScenery();
   });
 </script>
 </body>
