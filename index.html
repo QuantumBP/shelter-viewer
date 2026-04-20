@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { overflow:hidden; background:#f5f5f5; font-family:sans-serif; }
+
+    model-viewer {
+      width: 100%;
+      height: 100vh;
+      background: #F5F5F5;
+      position: relative;
+      z-index: 1;
+      --progress-bar-color: transparent;
+    }
+
+    .controls {
+      position: absolute; top: 10px; left: 10px; background: white; padding: 10px; border-radius: 10px;
+      z-index: 20; box-shadow: 0 2px 10px rgba(0,0,0,0.2); width: 130px;
+    }
+    .palette { margin-bottom: 10px; position: relative; }
+    label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 12px; }
+
+    .swatch-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;
+      max-height: 140px; overflow-y: auto; overflow-x: hidden; padding-right: 4px;
+      scrollbar-width: none; -ms-overflow-style: none;
+    }
+    .swatch-grid::-webkit-scrollbar { display: none; }
+
+    .swatch {
+      width: 100%; aspect-ratio: 1/1; max-width: 35px; max-height: 35px; border-radius: 5px;
+      cursor: pointer; border: 2px solid transparent; transition: transform 0.1s, border 0.2s; box-sizing: border-box;
+    }
+    .swatch:hover { transform: scale(1.08); }
+    .swatch.active { border: 2px solid #000; }
+
+    .expand-btn {
+      position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; cursor: pointer; opacity: 0.7;
+    }
+    .expand-btn:hover { opacity: 1; }
+
+    .controls.expanded {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; overflow-y: auto; border-radius: 0;
+      padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-content: start;
+      z-index: 30;
+    }
+    .controls.expanded .swatch-grid { grid-template-columns: repeat(10, 1fr); max-height: none; overflow: visible; }
+    .controls.expanded .palette label { font-size: 14px; }
+
+    #status {
+      position: absolute; bottom: 10px; left: 10px; z-index: 20;
+      background: rgba(0,0,0,0.7); color: #fff; padding: 6px 12px;
+      border-radius: 6px; font-size: 12px; display: none;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Controls -->
+<div class="controls" id="controls">
+  <div class="palette">
+    <img class="expand-btn" id="toggleExpand" src="https://img.icons8.com/ios-filled/50/expand.png" alt="Expand"/>
+    <label>Roof Color</label>
+    <div id="roofPalette" class="swatch-grid"></div>
+  </div>
+  <div class="palette">
+    <label>Frame Color</label>
+    <div id="framePalette" class="swatch-grid"></div>
+  </div>
+</div>
+
+<div id="status"></div>
+
+<!-- Main viewer (shelter) -->
+<model-viewer
+  id="viewer"
+  src="https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb"
+  camera-controls
+  camera-orbit="75deg 80deg 600m"
+  interpolation-decay="50"
+  auto-rotate
+  auto-rotate-delay="3000"
+  rotation-per-second="2deg"
+  interaction-prompt="none"
+  exposure="0.5"
+  shadow-intensity="0.8"
+  environment-image="legacy">
+</model-viewer>
+
+<script type="module">
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+  const viewer = document.querySelector('#viewer');
+  const controlsEl = document.getElementById('controls');
+  const toggleBtn = document.getElementById('toggleExpand');
+  const statusEl = document.getElementById('status');
+
+  /*
+   * IMPORTANT: Change this URL after enabling GitHub Pages.
+   * It will be: https://YOUR_GITHUB_USERNAME.github.io/shelter-viewer/scene_4_tables.glb
+   */
+  const SCENERY_URL = "scene_4_tables.glb"; // relative URL — works because the GLB is in the same repo
+
+  function showStatus(msg) { statusEl.textContent = msg; statusEl.style.display = 'block'; console.log('[Status]', msg); }
+  function hideStatus() { statusEl.style.display = 'none'; }
+
+  /*********************
+   * DPR
+   *********************/
+  const HIGH_DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const LOW_DPR = 1;
+  const IDLE_MS = 2000;
+  let idleDprTimer = null;
+
+  function setRendererDPR(dpr) {
+    try {
+      const r = viewer.renderer;
+      if (!r || typeof r.setPixelRatio !== 'function') return;
+      r.setPixelRatio(dpr);
+      const canvas = viewer.shadowRoot && viewer.shadowRoot.querySelector('canvas');
+      if (canvas && typeof r.setSize === 'function') {
+        r.setSize(canvas.clientWidth, canvas.clientHeight, false);
+      }
+      if (typeof viewer.requestRender === 'function') viewer.requestRender();
+    } catch (e) {}
+  }
+
+  function onCameraChange(e) {
+    if (e && e.detail && e.detail.source === 'user-interaction') {
+      try { viewer.removeAttribute('auto-rotate'); } catch(e) {}
+    }
+    setRendererDPR(HIGH_DPR);
+    if (idleDprTimer) clearTimeout(idleDprTimer);
+    idleDprTimer = setTimeout(() => { setRendererDPR(LOW_DPR); idleDprTimer = null; }, IDLE_MS);
+  }
+  viewer.addEventListener('camera-change', onCameraChange);
+
+  /*********************
+   * COLORS
+   *********************/
+  const roofColors = [
+    "#CDC8B9","#B9AA91","#AAA096","#9B8C7D","#735F50","#6E5541","#412D28",
+    "#5F5A50","#645F55","#413732","#4B4B4B","#373737","#000000","#5F5550",
+    "#919191","#A09B91","#B9B4AF","#C3C3BE","#DCDCDC","#504137","#817364",
+    "#A08C73","#DCC8AF","#502D32","#7D1923","#9B1928","#87281E","#143C2D",
+    "#005F64","#0F3C5A","#005591","#506978"
+  ];
+
+  const beamColors = [
+    "#CDB987","#CDAF82","#D2AA69","#F5A519","#E19B23","#C88C28","#DC8B23",
+    "#E68C23","#AF7D48","#DCAF23","#E1D7C3","#DCC396","#E1CDB0","#ECD936",
+    "#F1A24A","#F6C52C","#9D8876","#9E8863","#F4B319","#F5B419","#B88B46",
+    "#A47D2D","#F39519","#E09F23","#F5961E","#EB9B50","#EB911E","#D76E23",
+    "#B94623","#F07828","#E15523","#EB6923","#D75523","#CD5A28","#E16E23",
+    "#D2644B","#A5281E","#9B2323","#78231E","#821923","#691923","#55141E",
+    "#3C1E1E","#6E322D","#C3826E","#962D23","#B86A6A","#C29095","#963729",
+    "#B84E53","#B43841","#AA2020","#C56552","#A3223A","#9D3034","#765A7B",
+    "#863948","#BC5C87","#641E37","#736996","#913273","#46233C","#824B82",
+    "#9B8291","#B93C73","#2D4B6E","#0F4B64","#1E3C73","#1E3755","#141923",
+    "#005087","#32698C","#283741","#1E5F78","#004B78","#14283C","#0587B4",
+    "#142D50","#5F7D96","#007DAF","#005A8C","#05878C","#005A82","#00414B",
+    "#007373","#1E2D5A","#41698C","#5F91AA","#3C735F","#376432","#325528",
+    "#50503C","#004141","#0F4132","#3C372D","#282D1E","#373228","#233228",
+    "#4B6E37","#69785A","#2D3C37","#7D735A","#464132","#3C3C32","#00694B",
+    "#557D3C","#5F9641","#B9CDAA","#32412D","#879673","#373223","#008250",
+    "#5F6E3C","#005F4B","#7DB9B4","#325041","#006E3C","#237D50","#46877D",
+    "#78AAAA","#0A8C41","#78878C","#8C969B","#7C775F","#787369","#969696",
+    "#696E69","#73695A","#735F3C","#5A5F55","#555A55","#505A5A","#555A5A",
+    "#555041","#4B5055","#373C41","#2D3232","#4B4641","#7D7D73","#41464B",
+    "#374141","#918C82","#5A6969","#B4AFA0","#7D8273","#91876E","#C3C3C3",
+    "#969191","#787878","#AFAFA5","#69645A","#969BA0","#8C9191","#4B5050",
+    "#B4AFA5","#8C9191","#7D8287","#C3C8C3","#87693C","#9B5F28","#784B3C",
+    "#7D4B23","#8C462D","#6E4628","#6E4B23","#553723","#643228","#463223",
+    "#5A2D23","#4B281E","#412D28","#3C3232","#191414","#A55528","#725546",
+    "#735546","#503728","#E6DCCD","#D7D2C8","#EBEBE6","#282828","#0F0F0F",
+    "#F0EBE1","#323232","#F0F0EB","#E1E1E1"
+  ];
+
+  /*********************
+   * HELPERS
+   *********************/
+  function hexToRGBA(hex) {
+    return [
+      parseInt(hex.slice(1,3), 16) / 255,
+      parseInt(hex.slice(3,5), 16) / 255,
+      parseInt(hex.slice(5,7), 16) / 255,
+      1
+    ];
+  }
+
+  function applyColor(materialName, hex) {
+    if (!viewer.model || !viewer.model.materials) return;
+    const color = hexToRGBA(hex);
+    viewer.model.materials.forEach(mat => {
+      if (mat.name === materialName || mat.name.startsWith(materialName)) {
+        mat.pbrMetallicRoughness.setBaseColorFactor(color);
+      }
+    });
+  }
+
+  /*********************
+   * BUILD PALETTES
+   *********************/
+  function buildPalette(containerId, colors, materialName) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = "";
+    colors.forEach((hex, i) => {
+      const swatch = document.createElement("div");
+      swatch.className = "swatch" + (i === 0 ? " active" : "");
+      swatch.style.background = hex;
+      swatch.addEventListener("click", () => {
+        applyColor(materialName, hex);
+        container.querySelectorAll(".swatch").forEach(s => s.classList.remove("active"));
+        swatch.classList.add("active");
+      });
+      container.appendChild(swatch);
+    });
+  }
+
+  buildPalette("roofPalette", roofColors, "Roof");
+  buildPalette("framePalette", beamColors, "Frame");
+
+  /*********************
+   * EXPAND / COLLAPSE
+   *********************/
+  toggleBtn.addEventListener("click", () => {
+    controlsEl.classList.toggle("expanded");
+    toggleBtn.src = controlsEl.classList.contains("expanded")
+      ? "https://img.icons8.com/ios-filled/50/collapse.png"
+      : "https://img.icons8.com/ios-filled/50/expand.png";
+  });
+
+  /*********************
+   * SCENERY INJECTION
+   *
+   * 1. Capture model-viewer's internal Three.js Scene
+   *    via renderer.render() interception
+   * 2. Load scenery GLB with Three.js GLTFLoader
+   *    (relative URL — same origin, no CORS issues)
+   * 3. Add scenery into the captured scene
+   *********************/
+
+  function captureScene(mvElement) {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const poll = () => {
+        attempts++;
+        const renderer = mvElement.renderer;
+        if (!renderer || typeof renderer.render !== 'function') {
+          if (attempts < 50) { setTimeout(poll, 100); return; }
+          console.warn('Renderer not available after polling.');
+          resolve(null);
+          return;
+        }
+        const originalRender = renderer.render.bind(renderer);
+        let captured = false;
+        renderer.render = function(scene, camera) {
+          if (!captured && scene && scene.isScene) {
+            captured = true;
+            renderer.render = originalRender;
+            console.log('Captured internal scene:', scene);
+            resolve(scene);
+          }
+          return originalRender(scene, camera);
+        };
+        if (typeof mvElement.requestRender === 'function') mvElement.requestRender();
+        setTimeout(() => {
+          if (!captured) { renderer.render = originalRender; resolve(null); }
+        }, 5000);
+      };
+      poll();
+    });
+  }
+
+  async function injectScenery() {
+    if (!SCENERY_URL) return;
+
+    showStatus('Loading scenery...');
+    const loader = new GLTFLoader();
+
+    let gltf;
+    try {
+      gltf = await new Promise((resolve, reject) => {
+        loader.load(SCENERY_URL, resolve, undefined, reject);
+      });
+    } catch (err) {
+      console.error('GLTFLoader failed:', err);
+      showStatus('Scenery load failed. Check console.');
+      return;
+    }
+
+    if (!gltf || !gltf.scene) {
+      console.error('No scene in loaded GLB.');
+      showStatus('Scenery GLB has no scene.');
+      return;
+    }
+
+    console.log('Scenery loaded. Meshes:');
+    gltf.scene.traverse(n => {
+      if (n.isMesh) console.log('  mesh:', n.name, 'material:', n.material && n.material.name);
+    });
+
+    showStatus('Capturing viewer scene...');
+    const mainScene = await captureScene(viewer);
+    if (!mainScene) {
+      showStatus('Could not capture viewer scene.');
+      return;
+    }
+
+    showStatus('Injecting scenery...');
+    const sceneryRoot = gltf.scene;
+    sceneryRoot.name = 'InjectedScenery';
+    sceneryRoot.position.set(0, 0, 0);
+    mainScene.add(sceneryRoot);
+
+    // Poke re-renders
+    let pokeCount = 0;
+    const pokeInterval = setInterval(() => {
+      if (typeof viewer.requestRender === 'function') viewer.requestRender();
+      if (++pokeCount > 30) clearInterval(pokeInterval);
+    }, 100);
+
+    showStatus('Scenery injected!');
+    setTimeout(hideStatus, 3000);
+    console.log('Scenery injection complete!');
+  }
+
+  /*********************
+   * LOAD EVENT
+   *********************/
+  viewer.addEventListener("load", () => {
+    console.log("Shelter loaded.");
+    if (viewer.model && viewer.model.materials) {
+      console.log("Materials:", viewer.model.materials.map(m => m.name));
+    }
+    setRendererDPR(LOW_DPR);
+    injectScenery();
+  });
+</script>
+</body>
+</html>
