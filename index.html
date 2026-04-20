@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shelter + Scenery Viewer (Three.js)</title>
+
   <script type="importmap">
   {
     "imports": {
@@ -26,7 +28,7 @@
 
     .controls {
       position: absolute; top: 10px; left: 10px; background: white; padding: 10px; border-radius: 10px;
-      z-index: 20; box-shadow: 0 2px 10px rgba(0,0,0,0.2); width: 150px;
+      z-index: 20; box-shadow: 0 2px 10px rgba(0,0,0,0.2); width: 160px;
     }
     .palette { margin-bottom: 10px; position: relative; }
     label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 6px; }
@@ -59,27 +61,32 @@
     .controls.expanded .palette label { font-size: 14px; }
 
     #shelter-select {
-      width: 100%; padding: 4px; font-size: 12px; border-radius: 5px; border: 1px solid #ccc;
-      margin-bottom: 10px; cursor: pointer;
+      width: 100%; padding: 6px; font-size: 12px; border-radius: 6px; border: 1px solid #ccc;
+      margin-bottom: 10px;
     }
 
     #loading-overlay {
-      position: absolute; top:0; left:0; width:100%; height:100%;
+      position: absolute; inset:0;
       display:flex; align-items:center; justify-content:center;
       background: #f5f5f5; z-index: 50; font-size: 14px; color: #666;
-      transition: opacity 0.3s;
+      transition: opacity 0.25s;
     }
     #loading-overlay.hidden { opacity:0; pointer-events:none; }
+
+    #perf {
+      position:absolute; right:10px; top:10px; z-index:20;
+      background: rgba(0,0,0,0.65); color:#fff; padding:6px 10px; border-radius:6px;
+      font-size:12px; line-height:1.35;
+      user-select:none;
+    }
   </style>
 </head>
 <body>
 
 <div id="canvas-container">
-
-  <div id="loading-overlay">Loading models...</div>
+  <div id="loading-overlay">Loading models…</div>
 
   <div class="controls" id="controls">
-    <!-- Shelter selector -->
     <div class="palette">
       <label>Shelter Model</label>
       <select id="shelter-select"></select>
@@ -90,12 +97,14 @@
       <label>Roof Color</label>
       <div id="roofPalette" class="swatch-grid"></div>
     </div>
+
     <div class="palette">
       <label>Frame Color</label>
       <div id="framePalette" class="swatch-grid"></div>
     </div>
   </div>
 
+  <div id="perf">CPU: n/a<br/>FPS: n/a<br/>Drawcalls: n/a</div>
 </div>
 
 <script type="module">
@@ -104,228 +113,222 @@
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-  // ====== SHELTER LIST ======
-  // Add all 109 shelters here. Each entry has a display name and a URL.
-  // URLs can be relative (same repo) or absolute (any CDN).
+  // Prevent multiple init/loops if the script is accidentally evaluated twice
+  if (window.__SHELTER_APP__) {
+    console.warn('App already initialized; aborting duplicate init.');
+    throw new Error('Duplicate init prevented');
+  }
+  window.__SHELTER_APP__ = true;
+
+  // ========= CONFIG =========
+  // Keep your shelters on Wix:
   const SHELTERS = [
-    { name: "Hexagon Shelter",   url: "https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb" },
-    // Add more shelters below, e.g.:
-    // { name: "Shelter 2",  url: "shelters/shelter_2.glb" },
-    // { name: "Shelter 3",  url: "shelters/shelter_3.glb" },
-    // ...up to 109
+    { name: "Hexagon Shelter", url: "https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb" },
+    // Add the rest here (109 total)
   ];
 
+  // Scenery is local in your GitHub Pages repo
   const SCENERY_URL = "scene_4_tables.glb";
 
-  // ====== DOM ======
+  // Performance knobs
+  const MAX_DPR = 1.25;        // lower = smoother
+  const TARGET_FPS = 60;       // 60, 45, or 30
+  const ENABLE_SHADOWS = false; // start false; enable later if stable
+
+  // ========= DOM =========
+  const container = document.getElementById('canvas-container');
+  const loadingOverlay = document.getElementById('loading-overlay');
+  const perfEl = document.getElementById('perf');
+
   const controlsEl = document.getElementById('controls');
   const toggleBtn = document.getElementById('toggleExpand');
   const shelterSelect = document.getElementById('shelter-select');
-  const loadingOverlay = document.getElementById('loading-overlay');
-  const container = document.getElementById('canvas-container');
 
-  // ====== THREE.JS SETUP ======
-  const clock = new THREE.Clock();
+  // ========= THREE SETUP =========
+  THREE.Cache.enabled = true;
+
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xf5f5f5);
 
-  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 20000);
   camera.position.set(300, 250, 400);
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
-    powerPreference: 'high-performance'
+    powerPreference: 'high-performance',
+    alpha: false,
+    preserveDrawingBuffer: false
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // cap at 1.5 for performance
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_DPR));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.5;
-  renderer.shadowMap.enabled = true;
+  renderer.toneMappingExposure = 0.55;
+  renderer.shadowMap.enabled = ENABLE_SHADOWS;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.appendChild(renderer.domElement);
 
-  // Environment lighting
-  const pmremGenerator = new THREE.PMREMGenerator(renderer);
-  const envTexture = pmremGenerator.fromScene(new RoomEnvironment()).texture;
-  scene.environment = envTexture;
-  pmremGenerator.dispose();
+  // Environment (do once)
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environment = envTex;
+  pmrem.dispose();
 
-  // Directional light for shadows
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
-  dirLight.position.set(200, 400, 200);
-  dirLight.castShadow = true;
-  dirLight.shadow.mapSize.set(1024, 1024); // lower shadow map = better perf
-  dirLight.shadow.camera.near = 1;
-  dirLight.shadow.camera.far = 2000;
-  dirLight.shadow.camera.left = -500;
-  dirLight.shadow.camera.right = 500;
-  dirLight.shadow.camera.top = 500;
-  dirLight.shadow.camera.bottom = -500;
-  scene.add(dirLight);
+  // Lights (simple + cheap)
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.75);
+  hemi.position.set(0, 200, 0);
+  scene.add(hemi);
 
-  // Orbit controls with smooth damping
-  const orbitControls = new OrbitControls(camera, renderer.domElement);
-  orbitControls.enableDamping = true;
-  orbitControls.dampingFactor = 0.05;
-  orbitControls.target.set(0, 50, 0);
-  orbitControls.autoRotate = true;
-  orbitControls.autoRotateSpeed = 1.0;
-  orbitControls.update();
+  const dir = new THREE.DirectionalLight(0xffffff, 0.55);
+  dir.position.set(200, 400, 200);
+  dir.castShadow = ENABLE_SHADOWS;
+  if (ENABLE_SHADOWS) {
+    dir.shadow.mapSize.set(1024, 1024);
+    dir.shadow.camera.near = 1;
+    dir.shadow.camera.far = 2000;
+    dir.shadow.camera.left = -500;
+    dir.shadow.camera.right = 500;
+    dir.shadow.camera.top = 500;
+    dir.shadow.camera.bottom = -500;
+  }
+  scene.add(dir);
+
+  // Controls
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.target.set(0, 50, 0);
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 1.0;
+  controls.update();
 
   // Stop auto-rotate on first interaction
   renderer.domElement.addEventListener('pointerdown', () => {
-    orbitControls.autoRotate = false;
+    controls.autoRotate = false;
   }, { once: true });
 
-  // ====== SMOOTH ANIMATION LOOP (uses clock delta for consistency) ======
-  function animate() {
-    requestAnimationFrame(animate);
-    orbitControls.update();
-    renderer.render(scene, camera);
-  }
-  animate();
-
-  // ====== RESIZE ======
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-
-  // ====== LOADER ======
+  // ========= LOADER =========
   const loader = new GLTFLoader();
-  let shelterRoot = null;
+
   let sceneryRoot = null;
+  let shelterRoot = null;
+
+  function setLoading(isLoading, text = 'Loading…') {
+    loadingOverlay.textContent = text;
+    loadingOverlay.classList.toggle('hidden', !isLoading);
+  }
 
   function fitCameraToObject(object, offset = 1.5) {
     const box = new THREE.Box3().setFromObject(object);
     if (box.isEmpty()) return;
+
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
+
     const fov = camera.fov * (Math.PI / 180);
     let dist = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * offset;
     if (!isFinite(dist) || dist === 0) dist = maxDim * 2;
 
-    const direction = new THREE.Vector3().subVectors(camera.position, orbitControls.target).normalize();
-    camera.position.copy(center).add(direction.multiplyScalar(dist));
-    camera.near = Math.max(0.01, maxDim / 1000);
-    camera.far = Math.max(10000, maxDim * 100);
+    const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+    camera.position.copy(center).add(dir.multiplyScalar(dist));
+
+    camera.near = Math.max(0.05, maxDim / 1000);
+    camera.far = Math.max(20000, maxDim * 100);
     camera.updateProjectionMatrix();
-    orbitControls.target.copy(center);
-    orbitControls.update();
+
+    controls.target.copy(center);
+    controls.update();
   }
 
-  function loadGLB(url) {
-    return new Promise((resolve, reject) => {
+  function disposeMaterial(mat) {
+    if (!mat) return;
+    const maps = [
+      'map','normalMap','roughnessMap','metalnessMap','aoMap','emissiveMap','alphaMap','bumpMap','displacementMap','lightMap','envMap'
+    ];
+    for (const k of maps) {
+      if (mat[k]) { mat[k].dispose(); mat[k] = null; }
+    }
+    mat.dispose();
+  }
+
+  function disposeObject3D(root) {
+    if (!root) return;
+    root.traverse((obj) => {
+      if (!obj.isMesh) return;
+      if (obj.geometry) obj.geometry.dispose();
+      if (Array.isArray(obj.material)) obj.material.forEach(disposeMaterial);
+      else disposeMaterial(obj.material);
+    });
+  }
+
+  async function loadGLB(url) {
+    return await new Promise((resolve, reject) => {
       loader.load(url, resolve, undefined, reject);
     });
   }
 
-  // Load a shelter by URL — removes old shelter, adds new one
-  async function loadShelter(url) {
-    loadingOverlay.textContent = 'Loading shelter...';
-    loadingOverlay.classList.remove('hidden');
+  async function loadSceneryOnce() {
+    setLoading(true, 'Loading scenery…');
+    const gltf = await loadGLB(SCENERY_URL);
+    sceneryRoot = gltf.scene;
+    sceneryRoot.name = 'Scenery';
+    sceneryRoot.traverse(o => {
+      if (o.isMesh) {
+        o.castShadow = ENABLE_SHADOWS;
+        o.receiveShadow = ENABLE_SHADOWS;
+        o.frustumCulled = true;
+      }
+    });
+    scene.add(sceneryRoot);
+  }
 
-    // Remove old shelter
+  async function loadShelterByUrl(url) {
+    setLoading(true, 'Loading shelter…');
+
     if (shelterRoot) {
       scene.remove(shelterRoot);
-      // Dispose geometry/materials to free memory
-      shelterRoot.traverse(n => {
-        if (n.isMesh) {
-          if (n.geometry) n.geometry.dispose();
-          const mats = Array.isArray(n.material) ? n.material : [n.material];
-          mats.forEach(m => {
-            if (m) {
-              if (m.map) m.map.dispose();
-              if (m.normalMap) m.normalMap.dispose();
-              if (m.roughnessMap) m.roughnessMap.dispose();
-              if (m.metalnessMap) m.metalnessMap.dispose();
-              m.dispose();
-            }
-          });
-        }
-      });
+      disposeObject3D(shelterRoot);
       shelterRoot = null;
+      // Hint to GC
+      renderer.renderLists.dispose();
     }
 
-    try {
-      const gltf = await loadGLB(url);
-      shelterRoot = gltf.scene;
-      shelterRoot.name = 'Shelter';
-      shelterRoot.traverse(n => {
-        if (n.isMesh) {
-          n.castShadow = true;
-          n.receiveShadow = true;
-        }
-      });
-      scene.add(shelterRoot);
+    const gltf = await loadGLB(url);
+    shelterRoot = gltf.scene;
+    shelterRoot.name = 'Shelter';
+    shelterRoot.traverse(o => {
+      if (o.isMesh) {
+        o.castShadow = ENABLE_SHADOWS;
+        o.receiveShadow = ENABLE_SHADOWS;
+        o.frustumCulled = true;
+      }
+    });
+    scene.add(shelterRoot);
 
-      // Log materials
-      const matNames = [];
-      shelterRoot.traverse(n => {
-        if (n.isMesh) {
-          const mats = Array.isArray(n.material) ? n.material : [n.material];
-          mats.forEach(m => { if (m && m.name && !matNames.includes(m.name)) matNames.push(m.name); });
-        }
-      });
-      console.log('Shelter loaded. Materials:', matNames);
-
-      fitCameraToObject(shelterRoot);
-    } catch (err) {
-      console.error('Shelter load error:', err);
-      loadingOverlay.textContent = 'Shelter load failed.';
-      return;
-    }
-
-    loadingOverlay.classList.add('hidden');
+    fitCameraToObject(shelterRoot);
+    setLoading(false);
   }
 
-  // Load scenery (once)
-  async function loadScenery() {
-    try {
-      const gltf = await loadGLB(SCENERY_URL);
-      sceneryRoot = gltf.scene;
-      sceneryRoot.name = 'Scenery';
-      sceneryRoot.traverse(n => {
-        if (n.isMesh) {
-          n.castShadow = true;
-          n.receiveShadow = true;
-        }
-      });
-      scene.add(sceneryRoot);
-      console.log('Scenery loaded.');
-    } catch (err) {
-      console.error('Scenery load error:', err);
-    }
-  }
-
-  // ====== INIT: load scenery + first shelter ======
-  async function init() {
-    await Promise.all([
-      loadScenery(),
-      loadShelter(SHELTERS[0].url)
-    ]);
-    loadingOverlay.classList.add('hidden');
-  }
-  init();
-
-  // ====== SHELTER SELECTOR ======
+  // ========= UI: shelters dropdown =========
   SHELTERS.forEach((s, i) => {
     const opt = document.createElement('option');
-    opt.value = i;
+    opt.value = String(i);
     opt.textContent = s.name;
     shelterSelect.appendChild(opt);
   });
 
-  shelterSelect.addEventListener('change', () => {
-    const idx = parseInt(shelterSelect.value);
-    if (SHELTERS[idx]) {
-      loadShelter(SHELTERS[idx].url);
+  shelterSelect.addEventListener('change', async () => {
+    const idx = parseInt(shelterSelect.value, 10);
+    if (!SHELTERS[idx]) return;
+    try {
+      await loadShelterByUrl(SHELTERS[idx].url);
+    } catch (e) {
+      console.error(e);
+      setLoading(true, 'Shelter load failed (see console).');
     }
   });
 
-  // ====== COLOR SWATCHES ======
+  // ========= Color swatches =========
   const roofColors = [
     "#CDC8B9","#B9AA91","#AAA096","#9B8C7D","#735F50","#6E5541","#412D28",
     "#5F5A50","#645F55","#413732","#4B4B4B","#373737","#000000","#5F5550",
@@ -333,7 +336,6 @@
     "#A08C73","#DCC8AF","#502D32","#7D1923","#9B1928","#87281E","#143C2D",
     "#005F64","#0F3C5A","#005591","#506978"
   ];
-
   const beamColors = [
     "#CDB987","#CDAF82","#D2AA69","#F5A519","#E19B23","#C88C28","#DC8B23",
     "#E68C23","#AF7D48","#DCAF23","#E1D7C3","#DCC396","#E1CDB0","#ECD936",
@@ -346,65 +348,110 @@
     "#863948","#BC5C87","#641E37","#736996","#913273","#46233C","#824B82",
     "#9B8291","#B93C73","#2D4B6E","#0F4B64","#1E3C73","#1E3755","#141923",
     "#005087","#32698C","#283741","#1E5F78","#004B78","#14283C","#0587B4",
-    "#142D50","#5F7D96","#007DAF","#005A8C","#05878C","#005A82","#00414B",
-    "#007373","#1E2D5A","#41698C","#5F91AA","#3C735F","#376432","#325528",
-    "#50503C","#004141","#0F4132","#3C372D","#282D1E","#373228","#233228",
-    "#4B6E37","#69785A","#2D3C37","#7D735A","#464132","#3C3C32","#00694B",
-    "#557D3C","#5F9641","#B9CDAA","#32412D","#879673","#373223","#008250",
-    "#5F6E3C","#005F4B","#7DB9B4","#325041","#006E3C","#237D50","#46877D",
-    "#78AAAA","#0A8C41","#78878C","#8C969B","#7C775F","#787369","#969696",
-    "#696E69","#73695A","#735F3C","#5A5F55","#555A55","#505A5A","#555A5A",
-    "#555041","#4B5055","#373C41","#2D3232","#4B4641","#7D7D73","#41464B",
-    "#374141","#918C82","#5A6969","#B4AFA0","#7D8273","#91876E","#C3C3C3",
-    "#969191","#787878","#AFAFA5","#69645A","#969BA0","#8C9191","#4B5050",
-    "#B4AFA5","#8C9191","#7D8287","#C3C8C3","#87693C","#9B5F28","#784B3C",
-    "#7D4B23","#8C462D","#6E4628","#6E4B23","#553723","#643228","#463223",
-    "#5A2D23","#4B281E","#412D28","#3C3232","#191414","#A55528","#725546",
-    "#735546","#503728","#E6DCCD","#D7D2C8","#EBEBE6","#282828","#0F0F0F",
-    "#F0EBE1","#323232","#F0F0EB","#E1E1E1"
+    "#142D50","#5F7D96","#007DAF","#005F4B","#E1E1E1"
   ];
 
-  function applyColor(materialName, hex) {
+  function applyColor(materialPrefix, hex) {
     if (!shelterRoot) return;
-    const color = new THREE.Color(hex);
-    shelterRoot.traverse(n => {
-      if (!n.isMesh) return;
-      const mats = Array.isArray(n.material) ? n.material : [n.material];
-      mats.forEach(mat => {
-        if (mat && (mat.name === materialName || mat.name.startsWith(materialName))) {
-          mat.color.copy(color);
-          if (mat.map) { mat.map = null; mat.needsUpdate = true; }
+    const c = new THREE.Color(hex);
+    shelterRoot.traverse(o => {
+      if (!o.isMesh) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(m => {
+        if (!m || !m.name) return;
+        if (m.name === materialPrefix || m.name.startsWith(materialPrefix)) {
+          if (m.color) m.color.copy(c);
+          // If you want color to always show, remove textures:
+          // if (m.map) { m.map.dispose(); m.map = null; m.needsUpdate = true; }
+          m.needsUpdate = true;
         }
       });
     });
   }
 
-  function buildPalette(containerId, colors, materialName) {
+  function buildPalette(containerId, colors, targetPrefix) {
     const container = document.getElementById(containerId);
-    container.innerHTML = "";
+    container.innerHTML = '';
     colors.forEach((hex, i) => {
-      const swatch = document.createElement("div");
-      swatch.className = "swatch" + (i === 0 ? " active" : "");
-      swatch.style.background = hex;
-      swatch.addEventListener("click", () => {
-        applyColor(materialName, hex);
-        container.querySelectorAll(".swatch").forEach(s => s.classList.remove("active"));
-        swatch.classList.add("active");
+      const sw = document.createElement('div');
+      sw.className = 'swatch' + (i === 0 ? ' active' : '');
+      sw.style.background = hex;
+      sw.addEventListener('click', () => {
+        applyColor(targetPrefix, hex);
+        container.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+        sw.classList.add('active');
       });
-      container.appendChild(swatch);
+      container.appendChild(sw);
     });
   }
+  buildPalette('roofPalette', roofColors, 'Roof');
+  buildPalette('framePalette', beamColors, 'Frame');
 
-  buildPalette("roofPalette", roofColors, "Roof");
-  buildPalette("framePalette", beamColors, "Frame");
-
-  // ====== EXPAND / COLLAPSE ======
-  toggleBtn.addEventListener("click", () => {
-    controlsEl.classList.toggle("expanded");
-    toggleBtn.src = controlsEl.classList.contains("expanded")
+  // ========= Expand/collapse =========
+  toggleBtn.addEventListener('click', () => {
+    controlsEl.classList.toggle('expanded');
+    toggleBtn.src = controlsEl.classList.contains('expanded')
       ? "https://img.icons8.com/ios-filled/50/collapse.png"
       : "https://img.icons8.com/ios-filled/50/expand.png";
   });
+
+  // ========= Resize =========
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ========= Perf readout + FPS cap =========
+  let last = performance.now();
+  let acc = 0;
+  let frames = 0;
+  let fps = 0;
+
+  const frameMinMs = 1000 / TARGET_FPS;
+  let lastFrameTime = 0;
+
+  function loop(now) {
+    // FPS cap
+    if (now - lastFrameTime < frameMinMs) {
+      requestAnimationFrame(loop);
+      return;
+    }
+    lastFrameTime = now;
+
+    controls.update();
+    renderer.render(scene, camera);
+
+    // FPS calc
+    const dt = now - last;
+    last = now;
+    acc += dt;
+    frames++;
+    if (acc >= 1000) {
+      fps = Math.round((frames * 1000) / acc);
+      acc = 0;
+      frames = 0;
+
+      const info = renderer.info;
+      perfEl.innerHTML = `FPS: ${fps}<br/>Drawcalls: ${info.render.calls}<br/>Tris: ${info.render.triangles}`;
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  async function init() {
+    try {
+      await loadSceneryOnce();
+      await loadShelterByUrl(SHELTERS[0].url);
+      setLoading(false);
+    } catch (e) {
+      console.error(e);
+      setLoading(true, 'Init failed (see console).');
+    }
+    requestAnimationFrame(loop);
+  }
+
+  init();
 </script>
 </body>
 </html>
