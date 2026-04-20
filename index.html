@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Shelter + Scenery Viewer (Ultra Optimized)</title>
+  <title>Shelter + Scenery Viewer (Optimized)</title>
 
   <script type="importmap">
   {
@@ -21,22 +21,16 @@
     #canvas-container { width:100%; height:100vh; position:relative; }
     canvas { display:block; width:100%; height:100%; }
 
-    .controls {
+    .controls{
       position:absolute; top:10px; left:10px; width:170px;
       background:#fff; padding:10px; border-radius:10px;
       z-index:20; box-shadow:0 2px 10px rgba(0,0,0,0.2);
     }
-
-    label { display:block; font-weight:600; font-size:12px; margin:8px 0 6px; }
-
-    #shelter-select {
+    label{ display:block; font-weight:600; font-size:12px; margin:8px 0 6px; }
+    #shelter-select{
       width:100%; padding:6px; font-size:12px; border-radius:6px;
       border:1px solid #ccc; margin-bottom:8px;
     }
-
-    .row { display:flex; gap:8px; align-items:center; margin:6px 0; }
-    .row input { width: 14px; height: 14px; }
-
     .swatch-grid{
       display:grid; grid-template-columns:repeat(3, 1fr); gap:5px;
       max-height:140px; overflow:auto; padding-right:4px;
@@ -73,16 +67,6 @@
     <label>Shelter Model</label>
     <select id="shelter-select"></select>
 
-    <div class="row">
-      <input id="autorotate" type="checkbox" checked />
-      <label for="autorotate" style="margin:0;font-weight:600;">Auto-rotate</label>
-    </div>
-
-    <div class="row">
-      <input id="hqEnv" type="checkbox" />
-      <label for="hqEnv" style="margin:0;font-weight:600;">HQ lighting</label>
-    </div>
-
     <label>Roof Color</label>
     <div id="roofPalette" class="swatch-grid"></div>
 
@@ -97,37 +81,35 @@
   import * as THREE from 'three';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-  import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+  import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 
-  // Prevent accidental double-init
-  if (window.__ULTRA_VIEWER__) throw new Error('Duplicate init prevented');
-  window.__ULTRA_VIEWER__ = true;
+  // Prevent double init
+  if (window.__SHELTER_VIEWER_OPT__) throw new Error('Duplicate init prevented');
+  window.__SHELTER_VIEWER_OPT__ = true;
 
   // ====== CONFIG ======
-  // Keep shelters on Wix (add all 109 here)
   const SHELTERS = [
     { name: "Hexagon Shelter", url: "https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb" },
-    // { name: "Shelter 2", url: "https://static.wixstatic.com/3d/....glb" },
+    // add more...
   ];
-
-  // Scenery served from this GitHub Pages site
   const SCENERY_URL = "scene_4_tables.glb";
 
-  // Performance knobs (tuned for weak laptops)
-  const FPS_CAP = 30;                 // 30 = big CPU win
-  const DPR_IDLE = 1.0;               // quality when idle
-  const DPR_MOVING = 0.85;            // quality while interacting/rotating
-  const DPR_MAX = 1.15;               // never exceed this
-  const USE_SHADOWS = false;          // keep OFF for performance
-  const USE_PMREM_BY_DEFAULT = false; // HQ lighting toggle enables it
+  // Looks-good lighting with minimal runtime cost (PMREM once)
+  // You can swap this HDRI to another you like later.
+  const HDR_URL = "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/equirectangular/venice_sunset_1k.hdr";
+
+  // Performance knobs
+  const DPR_IDLE = 1.0;        // crisp when idle
+  const DPR_MOVING = 0.65;     // huge win during rotation
+  const DPR_MAX = 1.1;
+  const MOVING_FPS = 30;       // cap during motion
+  const IDLE_SETTLE_MS = 500;  // after user stops, wait then go back to idle DPR
 
   // ====== DOM ======
   const container = document.getElementById('canvas-container');
   const loadingOverlay = document.getElementById('loading-overlay');
   const perfEl = document.getElementById('perf');
   const shelterSelect = document.getElementById('shelter-select');
-  const autorotateEl = document.getElementById('autorotate');
-  const hqEnvEl = document.getElementById('hqEnv');
 
   // ====== THREE SETUP ======
   THREE.Cache.enabled = true;
@@ -141,141 +123,133 @@
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     powerPreference: 'high-performance',
-    alpha: false,
-    preserveDrawingBuffer: false,
+    alpha: false
   });
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.shadowMap.enabled = USE_SHADOWS;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, DPR_MAX));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.55;
+  renderer.toneMappingExposure = 0.9; // closer to model-viewer brightness
+  renderer.shadowMap.enabled = false; // keep OFF for perf
   container.appendChild(renderer.domElement);
 
-  // Simple cheap lighting (default)
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.85);
-  hemi.position.set(0, 200, 0);
-  scene.add(hemi);
-
-  const dir = new THREE.DirectionalLight(0xffffff, 0.45);
+  // Simple “fill” light (cheap) — env map does the real work
+  const dir = new THREE.DirectionalLight(0xffffff, 0.25);
   dir.position.set(200, 400, 200);
-  dir.castShadow = USE_SHADOWS;
   scene.add(dir);
 
-  // Controls
+  // Orbit controls
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.enablePan = true;
-  controls.screenSpacePanning = true;
-  controls.autoRotate = true;
-  controls.autoRotateSpeed = 0.9;
   controls.target.set(0, 50, 0);
+  controls.enablePan = true;
+  controls.autoRotate = true;          // auto-rotate at start
+  controls.autoRotateSpeed = 1.0;
   controls.update();
 
-  // ====== Render-on-demand engine ======
+  // Stop auto-rotate on first interaction (no UI button)
+  function stopAutoRotate() {
+    if (!controls.autoRotate) return;
+    controls.autoRotate = false;
+    requestRender('stop autorotate');
+  }
+  const stopEvents = ['pointerdown','wheel','touchstart','keydown'];
+  stopEvents.forEach(evt =>
+    window.addEventListener(evt, stopAutoRotate, { once: true, passive: true })
+  );
+
+  // ====== Render scheduling + dynamic DPR ======
   let isAnimating = false;
-  let needsRender = true;      // render first frame
-  let isMoving = false;        // interaction/autorotate state
-  let lastFrameTime = 0;
-  const minFrameMs = 1000 / FPS_CAP;
+  let moving = false;
+  let movingUntil = 0; // timestamp until which we consider "moving"
+  let lastFrame = 0;
+  let lastRender = 0;
 
-  function setDPR(dpr) {
-    const clamped = Math.max(0.5, Math.min(dpr, DPR_MAX));
-    const px = Math.min(window.devicePixelRatio || 1, clamped);
-    renderer.setPixelRatio(px);
-    return px;
+  function clampDpr(x) {
+    return Math.max(0.5, Math.min(x, DPR_MAX));
   }
 
-  function requestRender(reason = '') {
-    needsRender = true;
-    if (!isAnimating) startLoop();
+  function setDpr(dpr) {
+    const used = Math.min(window.devicePixelRatio || 1, clampDpr(dpr));
+    renderer.setPixelRatio(used);
+    return used;
   }
 
-  function startLoop() {
-    if (isAnimating) return;
-    isAnimating = true;
-    lastFrameTime = 0;
-    requestAnimationFrame(loop);
+  function setLoading(on, text='Loading…') {
+    loadingOverlay.textContent = text;
+    loadingOverlay.classList.toggle('hidden', !on);
   }
 
-  function stopLoop() {
-    isAnimating = false;
+  function requestRender(reason='') {
+    // Mark moving during interaction OR autoRotate
+    // and extend the "moving" window so we keep low DPR for a short settle time.
+    const now = performance.now();
+    if (controls.autoRotate) {
+      movingUntil = Math.max(movingUntil, now + 50);
+    }
+    if (!isAnimating) {
+      isAnimating = true;
+      lastFrame = 0;
+      requestAnimationFrame(loop);
+    }
   }
+
+  // OrbitControls events to know when the user is interacting
+  controls.addEventListener('start', () => {
+    const now = performance.now();
+    movingUntil = Math.max(movingUntil, now + IDLE_SETTLE_MS);
+    requestRender('controls start');
+  });
+  controls.addEventListener('change', () => {
+    const now = performance.now();
+    movingUntil = Math.max(movingUntil, now + IDLE_SETTLE_MS);
+    requestRender('controls change');
+  });
+  controls.addEventListener('end', () => {
+    const now = performance.now();
+    movingUntil = Math.max(movingUntil, now + IDLE_SETTLE_MS);
+    requestRender('controls end');
+  });
+
+  const movingFrameMinMs = 1000 / MOVING_FPS;
 
   function loop(now) {
     if (!isAnimating) return;
 
-    // FPS cap
-    if (lastFrameTime && (now - lastFrameTime) < minFrameMs) {
+    // Are we moving (user interaction recently, or autorotate)?
+    moving = controls.autoRotate || (now < movingUntil);
+
+    // Cap FPS only while moving
+    if (moving && lastFrame && (now - lastFrame) < movingFrameMinMs) {
       requestAnimationFrame(loop);
       return;
     }
-    lastFrameTime = now;
+    lastFrame = now;
 
-    // Controls update only when needed
-    const wasMoving = isMoving;
-    isMoving = controls.autoRotate || controls.dragging || controls._isMouseDown || false;
+    // Dynamic DPR
+    const usedDpr = setDpr(moving ? DPR_MOVING : DPR_IDLE);
 
-    // OrbitControls doesn't expose a stable flag for movement; use its events too (below).
-    controls.update();
+    // Update controls only when needed
+    // (autoRotate needs per-frame update while active)
+    if (moving) controls.update();
 
-    // Dynamic resolution: lower while moving
-    const usedDPR = setDPR(isMoving ? DPR_MOVING : DPR_IDLE);
+    renderer.render(scene, camera);
+    lastRender = now;
 
-    if (needsRender || isMoving || wasMoving) {
+    // Perf HUD (cheap)
+    const info = renderer.info;
+    perfEl.innerHTML = `FPS cap: ${moving ? MOVING_FPS : 'idle'}<br/>DPR: ${usedDpr.toFixed(2)}<br/>Drawcalls: ${info.render.calls}`;
+
+    // If not moving anymore, stop the loop after one last crisp render
+    if (!moving) {
+      // Render one final crisp frame at idle DPR then stop
+      setDpr(DPR_IDLE);
       renderer.render(scene, camera);
-      needsRender = false;
-    } else {
-      // Nothing changed; stop to save CPU
-      stopLoop();
+      isAnimating = false;
       return;
     }
 
-    // Perf HUD (cheap, once per ~10 frames)
-    if ((Math.random() < 0.1)) {
-      const info = renderer.info;
-      perfEl.innerHTML = `FPS cap: ${FPS_CAP}<br/>DPR: ${usedDPR.toFixed(2)}<br/>Drawcalls: ${info.render.calls}`;
-    }
-
     requestAnimationFrame(loop);
-  }
-
-  // Make OrbitControls trigger renders only when camera changes
-  controls.addEventListener('start', () => { requestRender('controls start'); });
-  controls.addEventListener('change', () => { requestRender('controls change'); });
-  controls.addEventListener('end', () => { requestRender('controls end'); });
-
-  // Stop autorotate on first interaction (optional)
-  renderer.domElement.addEventListener('pointerdown', () => {
-    // If you want autorotate to stop permanently on touch/click:
-    // controls.autoRotate = false;
-    requestRender('pointerdown');
-  });
-
-  autorotateEl.addEventListener('change', () => {
-    controls.autoRotate = autorotateEl.checked;
-    requestRender('autorotate toggle');
-  });
-
-  // HQ environment toggle (PMREM). Expensive: only enable if laptop can handle it.
-  let pmrem = null;
-  let envTex = null;
-
-  function enableHQEnv(enabled) {
-    if (enabled) {
-      if (!pmrem) pmrem = new THREE.PMREMGenerator(renderer);
-      if (!envTex) envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-      scene.environment = envTex;
-    } else {
-      scene.environment = null;
-    }
-    requestRender('hq env toggle');
-  }
-
-  hqEnvEl.addEventListener('change', () => enableHQEnv(hqEnvEl.checked));
-  if (USE_PMREM_BY_DEFAULT) {
-    hqEnvEl.checked = true;
-    enableHQEnv(true);
   }
 
   window.addEventListener('resize', () => {
@@ -290,17 +264,9 @@
   let sceneryRoot = null;
   let shelterRoot = null;
 
-  function setLoading(isLoading, text='Loading…') {
-    loadingOverlay.textContent = text;
-    loadingOverlay.classList.toggle('hidden', !isLoading);
-  }
-
   function disposeMaterial(mat) {
     if (!mat) return;
-    const texProps = [
-      'map','normalMap','roughnessMap','metalnessMap','aoMap','emissiveMap',
-      'alphaMap','bumpMap','displacementMap','lightMap','envMap'
-    ];
+    const texProps = ['map','normalMap','roughnessMap','metalnessMap','aoMap','emissiveMap','alphaMap','bumpMap','displacementMap','lightMap','envMap'];
     for (const p of texProps) {
       if (mat[p]) { mat[p].dispose(); mat[p] = null; }
     }
@@ -349,15 +315,7 @@
     const gltf = await loadGLB(SCENERY_URL);
     sceneryRoot = gltf.scene;
     sceneryRoot.name = 'Scenery';
-
-    sceneryRoot.traverse(o => {
-      if (o.isMesh) {
-        o.castShadow = USE_SHADOWS;
-        o.receiveShadow = USE_SHADOWS;
-        o.frustumCulled = true;
-      }
-    });
-
+    sceneryRoot.traverse(o => { if (o.isMesh) o.frustumCulled = true; });
     scene.add(sceneryRoot);
     requestRender('scenery loaded');
   }
@@ -375,18 +333,12 @@
     const gltf = await loadGLB(url);
     shelterRoot = gltf.scene;
     shelterRoot.name = 'Shelter';
-    shelterRoot.traverse(o => {
-      if (o.isMesh) {
-        o.castShadow = USE_SHADOWS;
-        o.receiveShadow = USE_SHADOWS;
-        o.frustumCulled = true;
-      }
-    });
-
+    shelterRoot.traverse(o => { if (o.isMesh) o.frustumCulled = true; });
     scene.add(shelterRoot);
-    fitCameraToObject(shelterRoot);
 
+    fitCameraToObject(shelterRoot);
     setLoading(false);
+
     requestRender('shelter loaded');
   }
 
@@ -460,20 +412,33 @@
   shelterSelect.addEventListener('change', async () => {
     const idx = parseInt(shelterSelect.value, 10);
     if (!SHELTERS[idx]) return;
-    try {
-      await loadShelterByUrl(SHELTERS[idx].url);
-    } catch (e) {
-      console.error(e);
-      setLoading(true, 'Shelter load failed (see console).');
-    }
+    try { await loadShelterByUrl(SHELTERS[idx].url); }
+    catch (e) { console.error(e); setLoading(true, 'Shelter load failed (see console).'); }
   });
+
+  // ====== Environment lighting (good-looking, PMREM once) ======
+  async function setupEnv() {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const hdr = await new Promise((resolve, reject) => {
+      new RGBELoader().load(HDR_URL, resolve, undefined, reject);
+    });
+    const env = pmrem.fromEquirectangular(hdr).texture;
+    hdr.dispose();
+    pmrem.dispose();
+    scene.environment = env;
+    requestRender('env ready');
+  }
 
   // ====== Init ======
   async function init() {
     try {
       setLoading(true, 'Loading…');
-      await loadSceneryOnce();
-      await loadShelterByUrl(SHELTERS[0].url);
+      // Start env + loads in parallel
+      await Promise.all([
+        setupEnv(),
+        loadSceneryOnce(),
+        loadShelterByUrl(SHELTERS[0].url),
+      ]);
       setLoading(false);
       requestRender('init done');
     } catch (e) {
