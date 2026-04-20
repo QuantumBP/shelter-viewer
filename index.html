@@ -22,14 +22,14 @@
       position: relative;
     }
 
-    canvas { display:block; width:100%; height:100%; }
+    canvas { display:block; }
 
     .controls {
       position: absolute; top: 10px; left: 10px; background: white; padding: 10px; border-radius: 10px;
-      z-index: 20; box-shadow: 0 2px 10px rgba(0,0,0,0.2); width: 130px;
+      z-index: 20; box-shadow: 0 2px 10px rgba(0,0,0,0.2); width: 150px;
     }
     .palette { margin-bottom: 10px; position: relative; }
-    label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 12px; }
+    label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 6px; }
 
     .swatch-grid {
       display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;
@@ -58,17 +58,18 @@
     .controls.expanded .swatch-grid { grid-template-columns: repeat(10, 1fr); max-height: none; overflow: visible; }
     .controls.expanded .palette label { font-size: 14px; }
 
-    #status {
-      position: absolute; bottom: 10px; left: 10px; z-index: 20;
-      background: rgba(0,0,0,0.7); color: #fff; padding: 6px 12px;
-      border-radius: 6px; font-size: 12px; display: none;
+    #shelter-select {
+      width: 100%; padding: 4px; font-size: 12px; border-radius: 5px; border: 1px solid #ccc;
+      margin-bottom: 10px; cursor: pointer;
     }
 
     #loading-overlay {
       position: absolute; top:0; left:0; width:100%; height:100%;
       display:flex; align-items:center; justify-content:center;
       background: #f5f5f5; z-index: 50; font-size: 14px; color: #666;
+      transition: opacity 0.3s;
     }
+    #loading-overlay.hidden { opacity:0; pointer-events:none; }
   </style>
 </head>
 <body>
@@ -77,8 +78,13 @@
 
   <div id="loading-overlay">Loading models...</div>
 
-  <!-- Controls -->
   <div class="controls" id="controls">
+    <!-- Shelter selector -->
+    <div class="palette">
+      <label>Shelter Model</label>
+      <select id="shelter-select"></select>
+    </div>
+
     <div class="palette">
       <img class="expand-btn" id="toggleExpand" src="https://img.icons8.com/ios-filled/50/expand.png" alt="Expand"/>
       <label>Roof Color</label>
@@ -90,8 +96,6 @@
     </div>
   </div>
 
-  <div id="status"></div>
-
 </div>
 
 <script type="module">
@@ -100,28 +104,39 @@
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-  // ====== CONFIG ======
-  const SHELTER_URL = "https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb";
-  const SCENERY_URL = "scene_4_tables.glb"; // relative — same repo
+  // ====== SHELTER LIST ======
+  // Add all 109 shelters here. Each entry has a display name and a URL.
+  // URLs can be relative (same repo) or absolute (any CDN).
+  const SHELTERS = [
+    { name: "Hexagon Shelter",   url: "https://static.wixstatic.com/3d/e5d739_e6b26bcf112640d3a32b72f2d124ed1b.glb" },
+    // Add more shelters below, e.g.:
+    // { name: "Shelter 2",  url: "shelters/shelter_2.glb" },
+    // { name: "Shelter 3",  url: "shelters/shelter_3.glb" },
+    // ...up to 109
+  ];
 
+  const SCENERY_URL = "scene_4_tables.glb";
+
+  // ====== DOM ======
   const controlsEl = document.getElementById('controls');
   const toggleBtn = document.getElementById('toggleExpand');
-  const statusEl = document.getElementById('status');
+  const shelterSelect = document.getElementById('shelter-select');
   const loadingOverlay = document.getElementById('loading-overlay');
   const container = document.getElementById('canvas-container');
 
-  function showStatus(msg) { statusEl.textContent = msg; statusEl.style.display = 'block'; console.log('[Status]', msg); }
-  function hideStatus() { statusEl.style.display = 'none'; }
-
   // ====== THREE.JS SETUP ======
+  const clock = new THREE.Clock();
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xf5f5f5);
 
   const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
   camera.position.set(300, 250, 400);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    powerPreference: 'high-performance'
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // cap at 1.5 for performance
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.5;
@@ -129,17 +144,17 @@
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.appendChild(renderer.domElement);
 
-  // Environment lighting (similar to model-viewer's "legacy")
+  // Environment lighting
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
   const envTexture = pmremGenerator.fromScene(new RoomEnvironment()).texture;
   scene.environment = envTexture;
   pmremGenerator.dispose();
 
-  // Subtle directional light for shadows
+  // Directional light for shadows
   const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
   dirLight.position.set(200, 400, 200);
   dirLight.castShadow = true;
-  dirLight.shadow.mapSize.set(2048, 2048);
+  dirLight.shadow.mapSize.set(1024, 1024); // lower shadow map = better perf
   dirLight.shadow.camera.near = 1;
   dirLight.shadow.camera.far = 2000;
   dirLight.shadow.camera.left = -500;
@@ -148,27 +163,21 @@
   dirLight.shadow.camera.bottom = -500;
   scene.add(dirLight);
 
-  // Orbit controls
+  // Orbit controls with smooth damping
   const orbitControls = new OrbitControls(camera, renderer.domElement);
   orbitControls.enableDamping = true;
-  orbitControls.dampingFactor = 0.08;
+  orbitControls.dampingFactor = 0.05;
   orbitControls.target.set(0, 50, 0);
+  orbitControls.autoRotate = true;
+  orbitControls.autoRotateSpeed = 1.0;
   orbitControls.update();
 
-  // Auto-rotate
-  orbitControls.autoRotate = true;
-  orbitControls.autoRotateSpeed = 0.8;
-  let userInteracted = false;
-
-  // Stop auto-rotate on first user interaction
+  // Stop auto-rotate on first interaction
   renderer.domElement.addEventListener('pointerdown', () => {
-    if (!userInteracted) {
-      userInteracted = true;
-      orbitControls.autoRotate = false;
-    }
+    orbitControls.autoRotate = false;
   }, { once: true });
 
-  // ====== ANIMATION LOOP ======
+  // ====== SMOOTH ANIMATION LOOP (uses clock delta for consistency) ======
   function animate() {
     requestAnimationFrame(animate);
     orbitControls.update();
@@ -183,24 +192,10 @@
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // ====== LOAD MODELS ======
+  // ====== LOADER ======
   const loader = new GLTFLoader();
   let shelterRoot = null;
-
-  // Track loading
-  let modelsToLoad = 2;
-  let modelsLoaded = 0;
-
-  function onModelLoaded() {
-    modelsLoaded++;
-    if (modelsLoaded >= modelsToLoad) {
-      loadingOverlay.style.display = 'none';
-      console.log('All models loaded.');
-
-      // Fit camera to shelter
-      if (shelterRoot) fitCameraToObject(shelterRoot);
-    }
-  }
+  let sceneryRoot = null;
 
   function fitCameraToObject(object, offset = 1.5) {
     const box = new THREE.Box3().setFromObject(object);
@@ -221,65 +216,113 @@
     orbitControls.update();
   }
 
-  // Load shelter
-  showStatus('Loading shelter...');
-  loader.load(SHELTER_URL, (gltf) => {
-    shelterRoot = gltf.scene;
-    shelterRoot.name = 'Shelter';
-    shelterRoot.traverse(n => {
-      if (n.isMesh) {
-        n.castShadow = true;
-        n.receiveShadow = true;
-      }
+  function loadGLB(url) {
+    return new Promise((resolve, reject) => {
+      loader.load(url, resolve, undefined, reject);
     });
-    scene.add(shelterRoot);
-    console.log('Shelter loaded.');
+  }
 
-    // Log materials
-    const matNames = [];
-    shelterRoot.traverse(n => {
-      if (n.isMesh) {
-        const mats = Array.isArray(n.material) ? n.material : [n.material];
-        mats.forEach(m => { if (m && m.name && !matNames.includes(m.name)) matNames.push(m.name); });
-      }
-    });
-    console.log('Shelter materials:', matNames);
+  // Load a shelter by URL — removes old shelter, adds new one
+  async function loadShelter(url) {
+    loadingOverlay.textContent = 'Loading shelter...';
+    loadingOverlay.classList.remove('hidden');
 
-    onModelLoaded();
-  }, undefined, (err) => {
-    console.error('Shelter load error:', err);
-    showStatus('Shelter load failed.');
-    onModelLoaded();
+    // Remove old shelter
+    if (shelterRoot) {
+      scene.remove(shelterRoot);
+      // Dispose geometry/materials to free memory
+      shelterRoot.traverse(n => {
+        if (n.isMesh) {
+          if (n.geometry) n.geometry.dispose();
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          mats.forEach(m => {
+            if (m) {
+              if (m.map) m.map.dispose();
+              if (m.normalMap) m.normalMap.dispose();
+              if (m.roughnessMap) m.roughnessMap.dispose();
+              if (m.metalnessMap) m.metalnessMap.dispose();
+              m.dispose();
+            }
+          });
+        }
+      });
+      shelterRoot = null;
+    }
+
+    try {
+      const gltf = await loadGLB(url);
+      shelterRoot = gltf.scene;
+      shelterRoot.name = 'Shelter';
+      shelterRoot.traverse(n => {
+        if (n.isMesh) {
+          n.castShadow = true;
+          n.receiveShadow = true;
+        }
+      });
+      scene.add(shelterRoot);
+
+      // Log materials
+      const matNames = [];
+      shelterRoot.traverse(n => {
+        if (n.isMesh) {
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          mats.forEach(m => { if (m && m.name && !matNames.includes(m.name)) matNames.push(m.name); });
+        }
+      });
+      console.log('Shelter loaded. Materials:', matNames);
+
+      fitCameraToObject(shelterRoot);
+    } catch (err) {
+      console.error('Shelter load error:', err);
+      loadingOverlay.textContent = 'Shelter load failed.';
+      return;
+    }
+
+    loadingOverlay.classList.add('hidden');
+  }
+
+  // Load scenery (once)
+  async function loadScenery() {
+    try {
+      const gltf = await loadGLB(SCENERY_URL);
+      sceneryRoot = gltf.scene;
+      sceneryRoot.name = 'Scenery';
+      sceneryRoot.traverse(n => {
+        if (n.isMesh) {
+          n.castShadow = true;
+          n.receiveShadow = true;
+        }
+      });
+      scene.add(sceneryRoot);
+      console.log('Scenery loaded.');
+    } catch (err) {
+      console.error('Scenery load error:', err);
+    }
+  }
+
+  // ====== INIT: load scenery + first shelter ======
+  async function init() {
+    await Promise.all([
+      loadScenery(),
+      loadShelter(SHELTERS[0].url)
+    ]);
+    loadingOverlay.classList.add('hidden');
+  }
+  init();
+
+  // ====== SHELTER SELECTOR ======
+  SHELTERS.forEach((s, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = s.name;
+    shelterSelect.appendChild(opt);
   });
 
-  // Load scenery
-  showStatus('Loading scenery...');
-  loader.load(SCENERY_URL, (gltf) => {
-    const sceneryRoot = gltf.scene;
-    sceneryRoot.name = 'Scenery';
-    sceneryRoot.traverse(n => {
-      if (n.isMesh) {
-        n.castShadow = true;
-        n.receiveShadow = true;
-      }
-    });
-    scene.add(sceneryRoot);
-    console.log('Scenery loaded.');
-
-    const matNames = [];
-    sceneryRoot.traverse(n => {
-      if (n.isMesh) {
-        const mats = Array.isArray(n.material) ? n.material : [n.material];
-        mats.forEach(m => { if (m && m.name && !matNames.includes(m.name)) matNames.push(m.name); });
-      }
-    });
-    console.log('Scenery materials:', matNames);
-
-    onModelLoaded();
-  }, undefined, (err) => {
-    console.error('Scenery load error:', err);
-    showStatus('Scenery load failed.');
-    onModelLoaded();
+  shelterSelect.addEventListener('change', () => {
+    const idx = parseInt(shelterSelect.value);
+    if (SHELTERS[idx]) {
+      loadShelter(SHELTERS[idx].url);
+    }
   });
 
   // ====== COLOR SWATCHES ======
@@ -330,7 +373,6 @@
       mats.forEach(mat => {
         if (mat && (mat.name === materialName || mat.name.startsWith(materialName))) {
           mat.color.copy(color);
-          // Remove any texture map so the flat color is visible
           if (mat.map) { mat.map = null; mat.needsUpdate = true; }
         }
       });
